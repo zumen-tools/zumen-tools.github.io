@@ -160,12 +160,24 @@ button.ghost[aria-pressed="true"] { border-color: var(--accent); color: var(--ac
 .stage { position: relative; }
 .stage canvas { position: absolute; left: 0; top: 0; display: block; }
 .overlay { position: absolute; inset: 0; pointer-events: none; }
+.overlay .ob { pointer-events: auto; cursor: pointer; }
 .ob { position: absolute; border: 2px solid var(--box); border-radius: 2px; min-width: 8px; min-height: 8px; }
 .ob span {
   position: absolute; left: -2px; bottom: 100%; background: var(--box); color: #fff;
   font-size: 11px; font-weight: 700; line-height: 1; padding: 2px 4px; border-radius: 3px 3px 0 0;
 }
 .ob.sel { border-width: 3px; box-shadow: 0 0 0 3px rgba(255,150,0,.35); }
+.strips { display: none; }
+.strips.on { display: block; }
+.strip { margin-bottom: 14px; }
+.strip .lbl { font-size: 12px; color: var(--muted); margin-bottom: 3px; font-variant-numeric: tabular-nums; }
+.strip .sbox { position: relative; background: #fff; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; cursor: zoom-in; }
+.strip canvas { display: block; width: 100%; image-rendering: auto; }
+.strip .ob { pointer-events: auto; cursor: pointer; min-width: 14px; min-height: 14px; transform: translate(-2px, -2px); }
+.strip .ob span { font-size: 12px; padding: 2px 5px; }
+.strip .band { position: absolute; top: 0; bottom: 0; background: rgba(255,150,0,.18); min-width: 12px; transform: translateX(-4px); pointer-events: none; }
+.strip .ob:hover { box-shadow: 0 0 0 3px rgba(255,150,0,.45); }
+.viewport.off { display: none; }
 .list { max-height: calc(70vh + 44px); overflow: auto; }
 table { border-collapse: collapse; width: 100%; font-size: 13px; }
 th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; vertical-align: top; }
@@ -191,7 +203,7 @@ tbody tr:hover, tbody tr.sel { background: var(--surface-2); }
 </head>
 <body>
 <main>
-  <h1>図面差分チェッカー <small style="font-size:12px;font-weight:400;color:var(--muted)">版 2.1（2026-10-17）</small></h1>
+  <h1>図面差分チェッカー <small style="font-size:12px;font-weight:400;color:var(--muted)">版 2.2（2026-10-17）</small></h1>
   <p class="lead">旧版と新版の図面PDFを重ね、<b style="color:var(--removed)">削除＝赤</b>、<b style="color:var(--added)">追加＝青</b>で変更点をハイライトします。CADから出力した超長尺・極小文字の図面にも、スキャン図面にも使えます。</p>
   <div class="privacy">🔒 図面はこのPCのブラウザ内だけで処理されます。どこにも送信されません。</div>
 
@@ -309,20 +321,23 @@ tbody tr:hover, tbody tr.sel { background: var(--surface-2); }
     <div class="layout">
       <div>
         <div class="toolbar">
+          <button class="ghost" id="modeStrip" aria-pressed="true" hidden>折り返して全体</button>
           <button class="ghost" id="zoomFit">全体</button>
-          <button class="ghost" id="zoomH" hidden>高さに合わせる</button>
-          <button class="ghost" id="zoomOut" aria-label="縮小">－</button>
-          <span class="zoomval" id="zoomVal">100%</span>
-          <button class="ghost" id="zoomIn" aria-label="拡大">＋</button>
+          <span id="freeTools" style="display:contents">
+            <button class="ghost" id="zoomOut" aria-label="縮小">－</button>
+            <span class="zoomval" id="zoomVal">100%</span>
+            <button class="ghost" id="zoomIn" aria-label="拡大">＋</button>
+          </span>
           <span class="sp"></span>
           <button class="ghost" id="prevPage">◀ 前のページ</button>
           <button class="ghost" id="nextPage">次のページ ▶</button>
         </div>
+        <div class="strips" id="strips"></div>
         <div class="viewport" id="viewport"><div class="stage" id="stage"><div class="overlay" id="overlay"></div></div></div>
         <div class="row" style="margin-top:10px">
           <button class="ghost" id="dlPng">全体図を保存 (PNG)</button>
           <button class="ghost" id="dlCsv">変更箇所一覧を保存 (CSV)</button>
-          <span class="howto">ドラッグで移動、Ctrl＋ホイールで拡大縮小</span>
+          <span class="howto" id="viewHint">ドラッグで移動、Ctrl＋ホイールで拡大縮小</span>
         </div>
       </div>
       <div>
@@ -1082,6 +1097,7 @@ function findRegions(removed, added, w, h, p) {
 
       setProgress('変更箇所をまとめています…', 94);
       const pad = Math.max(2, Math.round(15 * D / 300));
+      const flagsView = flags.slice();   // 折り返し表示用に残す（finish にはコピー元を渡す）
       const fin = await call({ cmd: 'finish', flags, w: dw, h: dh, p: { cluster: Math.max(4, Math.round(+$('cluster').value * D / 300)), pad, emph: Math.max(1, Math.round(D / 300)) } }, [flags.buffer]);
       let regions = fin.regions;
       let textInfo = null;
@@ -1096,7 +1112,7 @@ function findRegions(removed, added, w, h, p) {
       const band = Math.max(1, Math.floor(dh / 40));
       regions.sort((a, b) => (Math.floor(a.y / band) - Math.floor(b.y / band)) || (a.x - b.x));
 
-      showResult({ page: pageNo, dpi, D, k, S, W, H, dw, dh, rgba: fin.rgba, regions, T, how, kind, dp, textInfo,
+      showResult({ page: pageNo, dpi, D, k, S, W, H, dw, dh, rgba: fin.rgba, flags: flagsView, regions, T, how, kind, dp, textInfo,
         ms: performance.now() - t0, ntiles: tiles.length });
     } catch (e) {
       if (String(e && e.message) === 'CANCEL') { showWarn('中止しました。'); }
@@ -1153,10 +1169,11 @@ function findRegions(removed, added, w, h, p) {
     $('prevPage').disabled = r.page <= 1;
     $('nextPage').disabled = r.page >= state.pageCount;
     $('page').value = r.page;
-    const fitH = r.dh * (vpEl.clientWidth / r.dw) + 4;
-    vpEl.style.height = `${Math.round(Math.max(140, Math.min(window.innerHeight * 0.7, fitH)))}px`;
-    $('zoomH').hidden = r.dw / r.dh < 4;   // 超長尺の図面だけ「高さに合わせる」を出す
-    requestAnimationFrame(() => { zoomFit(); $('result').scrollIntoView({ behavior: 'smooth', block: 'start' }); });
+    // 横長の図面（長辺が短辺の 3 倍超）は、文章のように折り返して全体を見せる
+    r.long = r.dw / r.dh > 3;
+    $('modeStrip').hidden = !r.long;
+    setMode(r.long ? 'strip' : 'free');
+    requestAnimationFrame(() => { if (!r.long) zoomFit(); $('result').scrollIntoView({ behavior: 'smooth', block: 'start' }); });
   }
   const kindOf = (g) => g.removed && g.added ? ['changed', '変更'] : g.removed ? ['removed', '削除'] : ['added', '追加'];
   const esc = (s) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -1175,6 +1192,101 @@ function findRegions(removed, added, w, h, p) {
     const tr = e.target.closest('tr[data-i]'); if (!tr) return;
     openDetail(+tr.dataset.i);
   });
+  $('overlay').addEventListener('pointerdown', (e) => { if (e.target.closest('.ob')) e.stopPropagation(); });
+  $('overlay').addEventListener('click', (e) => { const ob = e.target.closest('.ob'); if (ob) openDetail(+ob.dataset.i); });
+
+  // ---------- 折り返し表示（超長尺の図面用） ----------
+  // 全体を数段に分けて画面幅いっぱいに並べる。縮小は「ブロック内に線が 1 画素でもあれば描く」方式なので、
+  // 細い線や小さな差分も消えない。差分（赤・青）は 1 画素太らせて目立たせる
+  function setMode(m) {
+    const r = state.result; if (!r) return;
+    state.mode = m;
+    $('modeStrip').setAttribute('aria-pressed', m === 'strip' ? 'true' : 'false');
+    $('strips').classList.toggle('on', m === 'strip');
+    vpEl.classList.toggle('off', m === 'strip');
+    $('freeTools').style.display = m === 'strip' ? 'none' : 'contents';
+    $('zoomFit').textContent = r.long ? '1列で表示' : '全体';
+    $('viewHint').textContent = m === 'strip'
+      ? 'クリックした場所を拡大表示します。番号をクリックすると拡大図を表示します'
+      : 'ドラッグで移動、Ctrl＋ホイールで拡大縮小';
+    if (m === 'strip') buildStrips();
+    else {
+      const fitH = r.dh * (vpEl.clientWidth / r.dw) + 4;
+      vpEl.style.height = r.long ? `${Math.round(window.innerHeight * 0.6)}px`
+        : `${Math.round(Math.max(140, Math.min(window.innerHeight * 0.7, fitH)))}px`;
+    }
+  }
+  function buildStrips() {
+    const r = state.result, box = $('strips');
+    box.innerHTML = '';
+    const Wv = box.clientWidth || vpEl.clientWidth || 1000;
+    // 1 段の高さが 160px 前後になる段数（最大 16 段）
+    const n = Math.max(1, Math.min(16, Math.round(160 * r.dw / (r.dh * Wv))));
+    const segW = Math.ceil(r.dw / n);
+    const q = Math.max(1, Math.floor(segW / (Wv * (window.devicePixelRatio || 1))));   // 何画素を 1 画素にまとめるか
+    const mm = (v) => Math.round(v * MM / r.D);
+    const f = r.flags, ch = Math.ceil(r.dh / q);
+    for (let i = 0; i < n; i++) {
+      const x0 = i * segW, x1 = Math.min(r.dw, x0 + segW); if (x0 >= x1) break;
+      const cw = Math.ceil((x1 - x0) / q);
+      const pf = new Uint8Array(cw * ch);
+      for (let y = 0; y < r.dh; y++) {
+        const src = y * r.dw, dst = ((y / q) | 0) * cw;
+        for (let x = x0; x < x1; x++) { const v = f[src + x]; if (v) pf[dst + (((x - x0) / q) | 0)] |= v; }
+      }
+      const rgba = new Uint8ClampedArray(cw * ch * 4); rgba.fill(255);
+      for (let y = 0; y < ch; y++) for (let x = 0; x < cw; x++) {
+        const j = (y * cw + x) * 4;
+        let v = pf[y * cw + x], near = 0;
+        for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+          const yy = y + dy, xx = x + dx;
+          if (yy >= 0 && yy < ch && xx >= 0 && xx < cw) near |= pf[yy * cw + xx];
+        }
+        if (near & 2) { rgba[j] = 0; rgba[j + 1] = 90; rgba[j + 2] = 230; }
+        else if (near & 4) { rgba[j] = 230; rgba[j + 1] = 0; rgba[j + 2] = 0; }
+        else if (v & 1) { rgba[j] = 135; rgba[j + 1] = 135; rgba[j + 2] = 135; }
+      }
+      const c = document.createElement('canvas'); c.width = cw; c.height = ch;
+      c.getContext('2d').putImageData(new ImageData(rgba, cw, ch), 0, 0);
+      const wrap = document.createElement('div'); wrap.className = 'strip';
+      wrap.innerHTML = `<div class="lbl">${i + 1} 段目：左端から ${mm(x0).toLocaleString()} 〜 ${mm(x1).toLocaleString()} mm</div>`;
+      const sbox = document.createElement('div'); sbox.className = 'sbox';
+      sbox.style.width = `${(x1 - x0) / segW * 100}%`;
+      sbox.appendChild(c);
+      r.regions.forEach((g, gi) => {
+        if (g.x + g.w <= x0 || g.x >= x1) return;
+        const gx0 = Math.max(g.x, x0), gx1 = Math.min(g.x + g.w, x1);
+        // 変更箇所の位置に縦の帯を敷き、縮小表示でもすぐ目に入るようにする
+        const band = document.createElement('div'); band.className = 'band';
+        band.style.cssText = `left:${(gx0 - x0) / (x1 - x0) * 100}%;width:${(gx1 - gx0) / (x1 - x0) * 100}%`;
+        sbox.insertBefore(band, sbox.firstChild.nextSibling);
+        const ob = document.createElement('div'); ob.className = 'ob'; ob.dataset.i = gi;
+        ob.style.cssText = `left:${(gx0 - x0) / (x1 - x0) * 100}%;top:${g.y / r.dh * 100}%;width:${(gx1 - gx0) / (x1 - x0) * 100}%;height:${g.h / r.dh * 100}%`;
+        ob.innerHTML = `<span>${gi + 1}</span>`;
+        if (gi === state.detailIdx) ob.classList.add('sel');
+        sbox.appendChild(ob);
+      });
+      sbox.addEventListener('click', (e) => {
+        const ob = e.target.closest('.ob');
+        if (ob) { openDetail(+ob.dataset.i); return; }
+        // クリックした場所を、1 列表示で拡大して見せる
+        const rc = sbox.getBoundingClientRect();
+        const px = x0 + (e.clientX - rc.left) / rc.width * (x1 - x0), py = (e.clientY - rc.top) / rc.height * r.dh;
+        setMode('free');
+        const z = Math.min(1, (vpEl.clientHeight - 16) / r.dh * 3);
+        state.zoom = z; layoutStage(); setZoom(z);
+        vpEl.scrollLeft = px * z - vpEl.clientWidth / 2; vpEl.scrollTop = py * z - vpEl.clientHeight / 2;
+      });
+      wrap.appendChild(sbox);
+      box.appendChild(wrap);
+    }
+  }
+  let resizeTimer = null;
+  window.addEventListener('resize', () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => { if (state.result && state.mode === 'strip') buildStrips(); }, 200);
+  });
+  $('modeStrip').onclick = () => setMode('strip');
 
   // ---------- ズーム・移動 ----------
   function layoutStage() {
@@ -1207,11 +1319,14 @@ function findRegions(removed, added, w, h, p) {
     vpEl.scrollLeft = (g.x + g.w / 2) * z - vpEl.clientWidth / 2;
     vpEl.scrollTop = (g.y + g.h / 2) * z - vpEl.clientHeight / 2;
   }
-  $('zoomFit').onclick = zoomFit;
-  $('zoomH').onclick = () => {
+  $('zoomFit').onclick = () => {
     const r = state.result; if (!r) return;
-    vpEl.style.height = `${Math.round(window.innerHeight * 0.6)}px`;
+    if (!r.long) { zoomFit(); return; }
+    // 横長の図面は「1 列」で、高さを表示枠に合わせて横にスクロールして見る
+    setMode('free');
+    state.zoom = 1; layoutStage();
     setZoom((vpEl.clientHeight - 16) / r.dh, 0, 0);
+    vpEl.scrollLeft = 0; vpEl.scrollTop = 0;
   };
   $('zoomIn').onclick = () => setZoom(state.zoom * 1.5);
   $('zoomOut').onclick = () => setZoom(state.zoom / 1.5);
@@ -1234,8 +1349,8 @@ function findRegions(removed, added, w, h, p) {
     state.detailIdx = i;
     for (const x of $('list').querySelectorAll('tr.sel')) x.classList.remove('sel');
     for (const x of $('list').querySelectorAll(`tr[data-i="${i}"]`)) x.classList.add('sel');
-    for (const x of $('overlay').querySelectorAll('.ob')) x.classList.toggle('sel', +x.dataset.i === i);
-    focusRegion(g);
+    for (const x of document.querySelectorAll('#overlay .ob, #strips .ob')) x.classList.toggle('sel', +x.dataset.i === i);
+    if (state.mode !== 'strip') focusRegion(g);
     const [, kt] = kindOf(g), mm = (v) => (v * MM / r.D).toFixed(1);
     $('dTitle').textContent = `変更箇所 ${i + 1}　${kt}　位置 ${mm(g.x)}, ${mm(g.y)} mm　大きさ ${mm(g.w)}×${mm(g.h)} mm`;
     $('dNote').textContent = g.notes.length ? `内容: ${g.notes.join(' / ')}` : '';
