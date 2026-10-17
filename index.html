@@ -178,6 +178,29 @@ button.ghost[aria-pressed="true"] { border-color: var(--accent); color: var(--ac
 .strip .band { position: absolute; top: 0; bottom: 0; background: rgba(255,150,0,.18); min-width: 12px; transform: translateX(-4px); pointer-events: none; }
 .strip .ob:hover { box-shadow: 0 0 0 3px rgba(255,150,0,.45); }
 .viewport.off { display: none; }
+.sbs { display: none; }
+.sbs.on { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+@media (max-width: 760px) { .sbs.on { grid-template-columns: 1fr; } }
+.ptitle { font-size: 13px; font-weight: 700; margin-bottom: 4px; display: flex; gap: 8px; align-items: baseline; }
+.ptitle small { font-weight: 400; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pane.old .ptitle b { color: var(--removed); }
+.pane.new .ptitle b { color: var(--added); }
+.pview { position: relative; height: 62vh; min-height: 280px; background: #fff; border: 1px solid var(--border);
+  border-radius: 8px; overflow: hidden; cursor: grab; touch-action: none; user-select: none; }
+.pane.old .pview { border-top: 4px solid var(--removed); }
+.pane.new .pview { border-top: 4px solid var(--added); }
+.pview.drag { cursor: grabbing; }
+.pview canvas { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+.pov { position: absolute; inset: 0; pointer-events: none; }
+.pov .ob { pointer-events: auto; cursor: pointer; }
+.pov .cx, .pov .cy { position: absolute; background: rgba(0, 150, 255, .55); display: none; }
+.pov .cx { top: 0; bottom: 0; width: 1px; }
+.pov .cy { left: 0; right: 0; height: 1px; }
+.pov.cross .cx, .pov.cross .cy { display: block; }
+.pbusy { position: absolute; right: 8px; bottom: 6px; font-size: 11px; color: #666; background: rgba(255,255,255,.85);
+  border-radius: 4px; padding: 1px 6px; display: none; }
+.pview.busy .pbusy { display: block; }
+.sbsinfo { font-size: 12px; color: var(--muted); margin-top: 6px; font-variant-numeric: tabular-nums; }
 .list { max-height: calc(70vh + 44px); overflow: auto; }
 table { border-collapse: collapse; width: 100%; font-size: 13px; }
 th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; vertical-align: top; }
@@ -203,7 +226,7 @@ tbody tr:hover, tbody tr.sel { background: var(--surface-2); }
 </head>
 <body>
 <main>
-  <h1>図面差分チェッカー <small style="font-size:12px;font-weight:400;color:var(--muted)">版 2.2（2026-10-17）</small></h1>
+  <h1>図面差分チェッカー <small style="font-size:12px;font-weight:400;color:var(--muted)">版 2.3（2026-10-17）</small></h1>
   <p class="lead">旧版と新版の図面PDFを重ね、<b style="color:var(--removed)">削除＝赤</b>、<b style="color:var(--added)">追加＝青</b>で変更点をハイライトします。CADから出力した超長尺・極小文字の図面にも、スキャン図面にも使えます。</p>
   <div class="privacy">🔒 図面はこのPCのブラウザ内だけで処理されます。どこにも送信されません。</div>
 
@@ -321,18 +344,27 @@ tbody tr:hover, tbody tr.sel { background: var(--surface-2); }
     <div class="layout">
       <div>
         <div class="toolbar">
-          <button class="ghost" id="modeStrip" aria-pressed="true" hidden>折り返して全体</button>
-          <button class="ghost" id="zoomFit">全体</button>
+          <button class="ghost" id="modeStrip" data-mode="strip" hidden>折り返して全体</button>
+          <button class="ghost" data-mode="sbs">左右に並べて比較</button>
+          <button class="ghost" data-mode="free">重ねて表示</button>
           <span id="freeTools" style="display:contents">
             <button class="ghost" id="zoomOut" aria-label="縮小">－</button>
             <span class="zoomval" id="zoomVal">100%</span>
             <button class="ghost" id="zoomIn" aria-label="拡大">＋</button>
+            <button class="ghost" id="zoomFit">全体</button>
           </span>
           <span class="sp"></span>
           <button class="ghost" id="prevPage">◀ 前のページ</button>
           <button class="ghost" id="nextPage">次のページ ▶</button>
         </div>
         <div class="strips" id="strips"></div>
+        <div class="sbs" id="sbs">
+          <div class="pane old"><div class="ptitle"><b>旧版（変更前）</b><small id="pnOld"></small></div>
+            <div class="pview" id="pvOld"><canvas></canvas><div class="pov"><div class="cx"></div><div class="cy"></div><div class="boxes"></div></div><div class="pbusy">描画中…</div></div></div>
+          <div class="pane new"><div class="ptitle"><b>新版（変更後）</b><small id="pnNew"></small></div>
+            <div class="pview" id="pvNew"><canvas></canvas><div class="pov"><div class="cx"></div><div class="cy"></div><div class="boxes"></div></div><div class="pbusy">描画中…</div></div></div>
+        </div>
+        <div class="sbsinfo" id="sbsInfo"></div>
         <div class="viewport" id="viewport"><div class="stage" id="stage"><div class="overlay" id="overlay"></div></div></div>
         <div class="row" style="margin-top:10px">
           <button class="ghost" id="dlPng">全体図を保存 (PNG)</button>
@@ -856,13 +888,14 @@ function findRegions(removed, added, w, h, p) {
     const vp = page.getViewport({ scale: s });
     const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
     const ctx = cv.getContext('2d');
-    let tr = [1, 0, 0, 1, -ox, -oy];
-    if (T && !T.identity) {
-      const c = Math.cos(T.th), sn = Math.sin(T.th), a = T.sc * c, b = T.sc * sn;
-      tr = [a, b, -b, a, -T.sc * (c * T.cx - sn * T.cy) + T.cx + T.tx - ox, -T.sc * (sn * T.cx + c * T.cy) + T.cy + T.ty - oy];
-    }
-    await page.render({ canvasContext: ctx, viewport: vp, transform: tr, background: '#ffffff' }).promise;
+    await page.render({ canvasContext: ctx, viewport: vp, transform: makeTr(T, ox, oy), background: '#ffffff' }).promise;
     return { cv, ctx };
+  }
+  // 描画用の変換: (ox, oy) を左上に移し、T があれば新版を旧版の座標に重ねる
+  function makeTr(T, ox, oy) {
+    if (!T || T.identity) return [1, 0, 0, 1, -ox, -oy];
+    const c = Math.cos(T.th), sn = Math.sin(T.th), a = T.sc * c, b = T.sc * sn;
+    return [a, b, -b, a, -T.sc * (c * T.cx - sn * T.cy) + T.cx + T.tx - ox, -T.sc * (sn * T.cx + c * T.cy) + T.cy + T.ty - oy];
   }
   // 最も暗いチャンネルを濃さとする（黄・水色などの色線も拾う）
   function grayOf(ctx, w, h, keepRGBA) {
@@ -1112,7 +1145,7 @@ function findRegions(removed, added, w, h, p) {
       const band = Math.max(1, Math.floor(dh / 40));
       regions.sort((a, b) => (Math.floor(a.y / band) - Math.floor(b.y / band)) || (a.x - b.x));
 
-      showResult({ page: pageNo, dpi, D, k, S, W, H, dw, dh, rgba: fin.rgba, flags: flagsView, regions, T, how, kind, dp, textInfo,
+      showResult({ page: pageNo, dpi, D, k, S, W, H, dw, dh, wPt: io.wPt, hPt: io.hPt, rgba: fin.rgba, flags: flagsView, regions, T, how, kind, dp, textInfo,
         ms: performance.now() - t0, ntiles: tiles.length });
     } catch (e) {
       if (String(e && e.message) === 'CANCEL') { showWarn('中止しました。'); }
@@ -1171,9 +1204,13 @@ function findRegions(removed, added, w, h, p) {
     $('page').value = r.page;
     // 横長の図面（長辺が短辺の 3 倍超）は、文章のように折り返して全体を見せる
     r.long = r.dw / r.dh > 3;
+    r.Tpt = r.T.identity ? null : scaleT(r.T, 1 / r.S);   // 新版→旧版の変換（pt 単位）
     $('modeStrip').hidden = !r.long;
-    setMode(r.long ? 'strip' : 'free');
-    requestAnimationFrame(() => { if (!r.long) zoomFit(); $('result').scrollIntoView({ behavior: 'smooth', block: 'start' }); });
+    $('pnOld').textContent = state.oldName; $('pnNew').textContent = state.newName;
+    state.sv = null; state.freeInit = false;
+    for (const p of panes) { p.rv = null; p.canvas.width = 1; p.canvas.height = 1; }
+    setMode(r.long ? 'strip' : 'sbs');
+    requestAnimationFrame(() => $('result').scrollIntoView({ behavior: 'smooth', block: 'start' }));
   }
   const kindOf = (g) => g.removed && g.added ? ['changed', '変更'] : g.removed ? ['removed', '削除'] : ['added', '追加'];
   const esc = (s) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -1201,19 +1238,30 @@ function findRegions(removed, added, w, h, p) {
   function setMode(m) {
     const r = state.result; if (!r) return;
     state.mode = m;
-    $('modeStrip').setAttribute('aria-pressed', m === 'strip' ? 'true' : 'false');
+    for (const b of document.querySelectorAll('[data-mode]')) b.setAttribute('aria-pressed', b.dataset.mode === m ? 'true' : 'false');
     $('strips').classList.toggle('on', m === 'strip');
-    vpEl.classList.toggle('off', m === 'strip');
+    $('sbs').classList.toggle('on', m === 'sbs');
+    $('sbsInfo').style.display = m === 'sbs' ? 'block' : 'none';
+    vpEl.classList.toggle('off', m !== 'free');
     $('freeTools').style.display = m === 'strip' ? 'none' : 'contents';
-    $('zoomFit').textContent = r.long ? '1列で表示' : '全体';
-    $('viewHint').textContent = m === 'strip'
-      ? 'クリックした場所を拡大表示します。番号をクリックすると拡大図を表示します'
-      : 'ドラッグで移動、Ctrl＋ホイールで拡大縮小';
+    $('viewHint').textContent = {
+      strip: 'クリックした場所を左右に並べて表示します。番号をクリックすると、その箇所を表示します',
+      sbs: 'ドラッグ・ホイールで移動、Ctrl＋ホイール（またはダブルクリック）で拡大。左右は同じように動きます',
+      free: 'ドラッグで移動、Ctrl＋ホイールで拡大縮小。赤＝削除、青＝追加',
+    }[m];
     if (m === 'strip') buildStrips();
+    else if (m === 'sbs') {
+      // 横長でない図面は、枠の高さを図面の縦横比に合わせて余白を減らす
+      const w = panes[0].el.clientWidth || 500;
+      const hgt = r.long ? window.innerHeight * 0.62 : Math.min(window.innerHeight * 0.62, Math.max(260, w * r.hPt / r.wPt * 1.04));
+      for (const p of panes) p.el.style.height = `${Math.round(hgt)}px`;
+      if (!state.sv) sbsHome(); else sbsUpdate();
+    }
     else {
       const fitH = r.dh * (vpEl.clientWidth / r.dw) + 4;
       vpEl.style.height = r.long ? `${Math.round(window.innerHeight * 0.6)}px`
         : `${Math.round(Math.max(140, Math.min(window.innerHeight * 0.7, fitH)))}px`;
+      if (!state.freeInit) { state.freeInit = true; requestAnimationFrame(freeFit); }
     }
   }
   function buildStrips() {
@@ -1268,14 +1316,13 @@ function findRegions(removed, added, w, h, p) {
       });
       sbox.addEventListener('click', (e) => {
         const ob = e.target.closest('.ob');
-        if (ob) { openDetail(+ob.dataset.i); return; }
-        // クリックした場所を、1 列表示で拡大して見せる
+        if (ob) { setMode('sbs'); openDetail(+ob.dataset.i); return; }
+        // クリックした場所を、旧版・新版を左右に並べて見せる
         const rc = sbox.getBoundingClientRect();
         const px = x0 + (e.clientX - rc.left) / rc.width * (x1 - x0), py = (e.clientY - rc.top) / rc.height * r.dh;
-        setMode('free');
-        const z = Math.min(1, (vpEl.clientHeight - 16) / r.dh * 3);
-        state.zoom = z; layoutStage(); setZoom(z);
-        vpEl.scrollLeft = px * z - vpEl.clientWidth / 2; vpEl.scrollTop = py * z - vpEl.clientHeight / 2;
+        setMode('sbs');
+        const ptPerPx = 72 / r.D, el = panes[0].el;
+        sbsSet(px * ptPerPx, py * ptPerPx, Math.max(sbsFitZ(), el.clientHeight / r.hPt * 0.95) * 2);
       });
       wrap.appendChild(sbox);
       box.appendChild(wrap);
@@ -1284,9 +1331,141 @@ function findRegions(removed, added, w, h, p) {
   let resizeTimer = null;
   window.addEventListener('resize', () => {
     clearTimeout(resizeTimer);
-    resizeTimer = setTimeout(() => { if (state.result && state.mode === 'strip') buildStrips(); }, 200);
+    resizeTimer = setTimeout(() => {
+      if (!state.result) return;
+      if (state.mode === 'strip') buildStrips(); else if (state.mode === 'sbs') sbsUpdate();
+    }, 200);
   });
-  $('modeStrip').onclick = () => setMode('strip');
+  for (const b of document.querySelectorAll('[data-mode]')) b.onclick = () => setMode(b.dataset.mode);
+
+  // ---------- 左右に並べて比較 ----------
+  // 旧版・新版を同じ位置・同じ倍率で並べる。表示している範囲だけを画面の解像度で描き直すので、
+  // どれだけ拡大しても線や文字がにじまない。操作中は直前の絵を拡大・移動して見せ、止まったら描き直す
+  const panes = [['pvOld', 'old'], ['pvNew', 'neu']].map(([id, key]) => {
+    const el = $(id);
+    return { el, key, canvas: el.querySelector('canvas'), boxes: el.querySelector('.boxes'), pov: el.querySelector('.pov'), rv: null, task: null };
+  });
+  const PT_PER_MM = 72 / MM, ZOOM_100 = 96 / 72, ZMAX = 2400 / 72;
+  function sbsFitZ() {
+    const r = state.result, el = panes[0].el;
+    return Math.min(el.clientWidth / r.wPt, el.clientHeight / r.hPt) * 0.98;
+  }
+  function sbsHome() {
+    const r = state.result, el = panes[0].el;
+    if (r.long) {   // 横長の図面は高さを合わせて左端から
+      const z = el.clientHeight / r.hPt * 0.95;
+      sbsSet(el.clientWidth / 2 / z, r.hPt / 2, z);
+    } else sbsSet(r.wPt / 2, r.hPt / 2, sbsFitZ());
+  }
+  function sbsSet(cx, cy, z) {
+    const r = state.result;
+    z = Math.max(sbsFitZ() * 0.5, Math.min(ZMAX, z));
+    state.sv = { cx: Math.max(0, Math.min(r.wPt, cx)), cy: Math.max(0, Math.min(r.hPt, cy)), z };
+    sbsUpdate();
+  }
+  function sbsFocus(g) {
+    const r = state.result, el = panes[0].el, k = 72 / r.D;
+    const w = Math.max(g.w * k, 2 * PT_PER_MM), h = Math.max(g.h * k, 2 * PT_PER_MM);
+    const z = Math.max(sbsFitZ(), Math.min(16, el.clientWidth / (w * 5), el.clientHeight / (h * 5)));
+    sbsSet((g.x + g.w / 2) * k, (g.y + g.h / 2) * k, z);
+  }
+  let sbsTimer = null;
+  function sbsUpdate() {
+    const r = state.result, v = state.sv; if (!r || !v) return;
+    for (const p of panes) { applyPreview(p); drawPaneBoxes(p); }
+    $('zoomVal').textContent = `${Math.round(v.z / ZOOM_100 * 100).toLocaleString()}%`;
+    $('sbsInfo').textContent = `表示の中心：左端から ${(v.cx / PT_PER_MM).toFixed(1)} mm、上端から ${(v.cy / PT_PER_MM).toFixed(1)} mm　／　倍率 ${Math.round(v.z / ZOOM_100 * 100).toLocaleString()}%（原寸＝100%）`;
+    clearTimeout(sbsTimer);
+    sbsTimer = setTimeout(() => { for (const p of panes) renderPane(p); }, 140);
+  }
+  function applyPreview(p) {
+    const v = state.sv, rv = p.rv;
+    if (!rv) { p.canvas.style.transform = ''; return; }
+    const W = p.el.clientWidth, H = p.el.clientHeight, k = v.z / rv.z;
+    const tx = W / 2 - k * rv.W / 2 + (rv.cx - v.cx) * v.z, ty = H / 2 - k * rv.H / 2 + (rv.cy - v.cy) * v.z;
+    p.canvas.style.transform = `translate(${tx}px, ${ty}px) scale(${k})`;
+  }
+  function drawPaneBoxes(p) {
+    const r = state.result, v = state.sv, W = p.el.clientWidth, H = p.el.clientHeight, k = 72 / r.D;
+    let html = '';
+    r.regions.forEach((g, i) => {
+      const x = (g.x * k - v.cx) * v.z + W / 2, y = (g.y * k - v.cy) * v.z + H / 2, w = g.w * k * v.z, h = g.h * k * v.z;
+      if (x + w < -20 || y + h < -20 || x > W + 20 || y > H + 20) return;
+      html += `<div class="ob${i === state.detailIdx ? ' sel' : ''}" data-i="${i}" style="left:${x - 3}px;top:${y - 3}px;width:${w + 6}px;height:${h + 6}px"><span>${i + 1}</span></div>`;
+    });
+    p.boxes.innerHTML = html;
+  }
+  async function renderPane(p) {
+    const r = state.result, v = { ...state.sv };
+    const W = p.el.clientWidth, H = p.el.clientHeight; if (!W || !H) return;
+    const dpr = window.devicePixelRatio || 1, s = v.z * dpr, cw = Math.round(W * dpr), ch = Math.round(H * dpr);
+    const doc = p.key === 'old' ? state.old : state.neu;
+    const page = await doc.getPage(r.page);
+    const vp = page.getViewport({ scale: s });
+    const off = document.createElement('canvas'); off.width = cw; off.height = ch;
+    const tr = makeTr(p.key === 'old' || !r.Tpt ? null : scaleT(r.Tpt, s), v.cx * s - cw / 2, v.cy * s - ch / 2);
+    if (p.task) { try { p.task.cancel(); } catch (e) { /* 既に終わっている */ } }
+    const task = page.render({ canvasContext: off.getContext('2d'), viewport: vp, transform: tr, background: '#ffffff' });
+    p.task = task; p.el.classList.add('busy');
+    try { await task.promise; } catch (e) { return; }   // 新しい描画に置き換えられた
+    if (p.task !== task) return;
+    p.task = null; p.el.classList.remove('busy');
+    p.canvas.width = cw; p.canvas.height = ch;
+    p.canvas.getContext('2d').drawImage(off, 0, 0); off.width = 0;
+    p.canvas.style.width = `${W}px`; p.canvas.style.height = `${H}px`;
+    p.rv = { ...v, W, H };
+    applyPreview(p);
+  }
+  // 操作（どちらの枠で操作しても、左右が同じように動く）
+  for (const p of panes) {
+    let drag = null;
+    const local = (e) => { const rc = p.el.getBoundingClientRect(); return [e.clientX - rc.left, e.clientY - rc.top]; };
+    p.el.addEventListener('pointerdown', (e) => {
+      drag = { x: e.clientX, y: e.clientY, v: { ...state.sv }, moved: false, ob: e.target.closest('.ob') };
+      p.el.setPointerCapture(e.pointerId); p.el.classList.add('drag');
+    });
+    p.el.addEventListener('pointermove', (e) => {
+      const [mx, my] = local(e);
+      showCross(mx - p.el.clientWidth / 2, my - p.el.clientHeight / 2);
+      if (!drag) return;
+      const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+      if (Math.abs(dx) + Math.abs(dy) > 3) drag.moved = true;
+      if (drag.moved) sbsSet(drag.v.cx - dx / drag.v.z, drag.v.cy - dy / drag.v.z, drag.v.z);
+    });
+    const end = () => {
+      if (drag && !drag.moved && drag.ob) openDetail(+drag.ob.dataset.i);
+      drag = null; p.el.classList.remove('drag');
+    };
+    p.el.addEventListener('pointerup', end); p.el.addEventListener('pointercancel', end);
+    p.el.addEventListener('pointerleave', () => { if (!drag) hideCross(); });
+    p.el.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      const v = state.sv, r = state.result;
+      if (e.ctrlKey || e.metaKey) {
+        const [mx, my] = local(e), W = p.el.clientWidth, H = p.el.clientHeight;
+        const z2 = Math.max(sbsFitZ() * 0.5, Math.min(ZMAX, v.z * Math.exp(-e.deltaY * 0.0025)));
+        const ptx = v.cx + (mx - W / 2) / v.z, pty = v.cy + (my - H / 2) / v.z;
+        sbsSet(ptx - (mx - W / 2) / z2, pty - (my - H / 2) / z2, z2);
+      } else {
+        let dx = e.deltaX, dy = e.deltaY;
+        if (r.hPt * v.z <= p.el.clientHeight && !dx) { dx = dy; dy = 0; }   // 縦が収まっていれば横に送る
+        sbsSet(v.cx + dx / v.z, v.cy + dy / v.z, v.z);
+      }
+    }, { passive: false });
+    p.el.addEventListener('dblclick', (e) => {
+      const v = state.sv, [mx, my] = local(e), W = p.el.clientWidth, H = p.el.clientHeight;
+      sbsSet(v.cx + (mx - W / 2) / v.z, v.cy + (my - H / 2) / v.z, v.z * 2);
+    });
+  }
+  // 同じ位置を左右両方に十字線で示す
+  function showCross(dx, dy) {
+    for (const p of panes) {
+      p.pov.classList.add('cross');
+      p.pov.querySelector('.cx').style.left = `${p.el.clientWidth / 2 + dx}px`;
+      p.pov.querySelector('.cy').style.top = `${p.el.clientHeight / 2 + dy}px`;
+    }
+  }
+  function hideCross() { for (const p of panes) p.pov.classList.remove('cross'); }
 
   // ---------- ズーム・移動 ----------
   function layoutStage() {
@@ -1307,6 +1486,14 @@ function findRegions(removed, added, w, h, p) {
     vpEl.scrollLeft = ix * z - cx; vpEl.scrollTop = iy * z - cy;
     $('zoomVal').textContent = `${z < 0.1 ? (z * 100).toFixed(1) : Math.round(z * 100)}%`;
   }
+  function freeFit() {
+    const r = state.result; if (!r) return;
+    if (!r.long) { zoomFit(); return; }
+    // 横長の図面は高さを表示枠に合わせ、横にスクロールして見る
+    state.zoom = 1; layoutStage();
+    setZoom((vpEl.clientHeight - 16) / r.dh, 0, 0);
+    vpEl.scrollLeft = 0; vpEl.scrollTop = 0;
+  }
   function zoomFit() {
     const r = state.result; if (!r) return;
     state.zoom = 1;
@@ -1319,17 +1506,12 @@ function findRegions(removed, added, w, h, p) {
     vpEl.scrollLeft = (g.x + g.w / 2) * z - vpEl.clientWidth / 2;
     vpEl.scrollTop = (g.y + g.h / 2) * z - vpEl.clientHeight / 2;
   }
-  $('zoomFit').onclick = () => {
-    const r = state.result; if (!r) return;
-    if (!r.long) { zoomFit(); return; }
-    // 横長の図面は「1 列」で、高さを表示枠に合わせて横にスクロールして見る
-    setMode('free');
-    state.zoom = 1; layoutStage();
-    setZoom((vpEl.clientHeight - 16) / r.dh, 0, 0);
-    vpEl.scrollLeft = 0; vpEl.scrollTop = 0;
+  $('zoomFit').onclick = () => { if (state.mode === 'sbs') sbsHome(); else freeFit(); };
+  const zoomBy = (f) => {
+    if (state.mode === 'sbs') { const v = state.sv; sbsSet(v.cx, v.cy, v.z * f); } else setZoom(state.zoom * f);
   };
-  $('zoomIn').onclick = () => setZoom(state.zoom * 1.5);
-  $('zoomOut').onclick = () => setZoom(state.zoom / 1.5);
+  $('zoomIn').onclick = () => zoomBy(1.5);
+  $('zoomOut').onclick = () => zoomBy(1 / 1.5);
   vpEl.addEventListener('wheel', (e) => {
     if (!e.ctrlKey && !e.metaKey) return;
     e.preventDefault();
@@ -1350,7 +1532,8 @@ function findRegions(removed, added, w, h, p) {
     for (const x of $('list').querySelectorAll('tr.sel')) x.classList.remove('sel');
     for (const x of $('list').querySelectorAll(`tr[data-i="${i}"]`)) x.classList.add('sel');
     for (const x of document.querySelectorAll('#overlay .ob, #strips .ob')) x.classList.toggle('sel', +x.dataset.i === i);
-    if (state.mode !== 'strip') focusRegion(g);
+    if (state.mode === 'sbs') sbsFocus(g);
+    else if (state.mode === 'free') focusRegion(g);
     const [, kt] = kindOf(g), mm = (v) => (v * MM / r.D).toFixed(1);
     $('dTitle').textContent = `変更箇所 ${i + 1}　${kt}　位置 ${mm(g.x)}, ${mm(g.y)} mm　大きさ ${mm(g.w)}×${mm(g.h)} mm`;
     $('dNote').textContent = g.notes.length ? `内容: ${g.notes.join(' / ')}` : '';
