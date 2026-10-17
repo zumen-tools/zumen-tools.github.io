@@ -193,6 +193,8 @@ button.ghost[aria-pressed="true"] { border-color: var(--accent); color: var(--ac
 .pview canvas { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
 .pov { position: absolute; inset: 0; pointer-events: none; }
 .pov .ob { pointer-events: auto; cursor: pointer; }
+.pov svg { position: absolute; left: 0; top: 0; overflow: visible; }
+.chk { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); cursor: pointer; margin-left: 4px; }
 .pov .cx, .pov .cy { position: absolute; background: rgba(0, 150, 255, .55); display: none; }
 .pov .cx { top: 0; bottom: 0; width: 1px; }
 .pov .cy { left: 0; right: 0; height: 1px; }
@@ -226,7 +228,7 @@ tbody tr:hover, tbody tr.sel { background: var(--surface-2); }
 </head>
 <body>
 <main>
-  <h1>図面差分チェッカー <small style="font-size:12px;font-weight:400;color:var(--muted)">版 2.3（2026-10-17）</small></h1>
+  <h1>図面差分チェッカー <small style="font-size:12px;font-weight:400;color:var(--muted)">版 2.4（2026-10-17）</small></h1>
   <p class="lead">旧版と新版の図面PDFを重ね、<b style="color:var(--removed)">削除＝赤</b>、<b style="color:var(--added)">追加＝青</b>で変更点をハイライトします。CADから出力した超長尺・極小文字の図面にも、スキャン図面にも使えます。</p>
   <div class="privacy">🔒 図面はこのPCのブラウザ内だけで処理されます。どこにも送信されません。</div>
 
@@ -353,6 +355,7 @@ tbody tr:hover, tbody tr.sel { background: var(--surface-2); }
             <button class="ghost" id="zoomIn" aria-label="拡大">＋</button>
             <button class="ghost" id="zoomFit">全体</button>
           </span>
+          <label class="chk" title="PDFビューアで書き込んだ手書き・図形・付箋などを図面の上に表示します"><input type="checkbox" id="showAnnots" checked> 注記を表示</label>
           <span class="sp"></span>
           <button class="ghost" id="prevPage">◀ 前のページ</button>
           <button class="ghost" id="nextPage">次のページ ▶</button>
@@ -360,9 +363,9 @@ tbody tr:hover, tbody tr.sel { background: var(--surface-2); }
         <div class="strips" id="strips"></div>
         <div class="sbs" id="sbs">
           <div class="pane old"><div class="ptitle"><b>旧版（変更前）</b><small id="pnOld"></small></div>
-            <div class="pview" id="pvOld"><canvas></canvas><div class="pov"><div class="cx"></div><div class="cy"></div><div class="boxes"></div></div><div class="pbusy">描画中…</div></div></div>
+            <div class="pview" id="pvOld"><canvas></canvas><div class="pov"><svg class="annots"></svg><div class="cx"></div><div class="cy"></div><div class="boxes"></div></div><div class="pbusy">描画中…</div></div></div>
           <div class="pane new"><div class="ptitle"><b>新版（変更後）</b><small id="pnNew"></small></div>
-            <div class="pview" id="pvNew"><canvas></canvas><div class="pov"><div class="cx"></div><div class="cy"></div><div class="boxes"></div></div><div class="pbusy">描画中…</div></div></div>
+            <div class="pview" id="pvNew"><canvas></canvas><div class="pov"><svg class="annots"></svg><div class="cx"></div><div class="cy"></div><div class="boxes"></div></div><div class="pbusy">描画中…</div></div></div>
         </div>
         <div class="sbsinfo" id="sbsInfo"></div>
         <div class="viewport" id="viewport"><div class="stage" id="stage"><div class="overlay" id="overlay"></div></div></div>
@@ -816,8 +819,13 @@ function findRegions(removed, added, w, h, p) {
       const [x0, y0, x1, y1] = vp.convertToViewportRectangle(a.rect);
       const name = ANNOT_NAMES[a.subtype] || a.subtype;
       const content = String((a.contentsObj && a.contentsObj.str) || a.contents || '').trim().replace(/\s+/g, ' ');
+      // 画面に自前で描くための形（手書きは線の点列。その他は範囲）。ブラウザによっては PDF の手書きの点が描かれないため
+      const color = a.color && a.color.length >= 3 ? `rgb(${a.color[0]},${a.color[1]},${a.color[2]})` : '#e0007a';
+      const width = (a.borderStyle && a.borderStyle.width) || 1;
+      const ink = Array.isArray(a.inkLists) && a.inkLists.length
+        ? a.inkLists.map((l) => l.map((q) => vp.convertToViewportPoint(q.x, q.y))) : null;
       annots.push({ text: content ? `${name}「${content.slice(0, 30)}」` : name,
-        x0: Math.min(x0, x1), y0: Math.min(y0, y1), x1: Math.max(x0, x1), y1: Math.max(y0, y1) });
+        x0: Math.min(x0, x1), y0: Math.min(y0, y1), x1: Math.max(x0, x1), y1: Math.max(y0, y1), geom: { ink, color, width } });
     }
     const kind = (nImages > 0 && nPaths < 200) || (nImages === 0 && nPaths < 50 && !items.length) ? 'scan' : 'cad';
     return { wPt: vp.width, hPt: vp.height, kind, nImages, nPaths, items, annots, textSize: sizes.length ? sizes[Math.floor(sizes.length / 10)] : 0 };
@@ -1145,7 +1153,7 @@ function findRegions(removed, added, w, h, p) {
       const band = Math.max(1, Math.floor(dh / 40));
       regions.sort((a, b) => (Math.floor(a.y / band) - Math.floor(b.y / band)) || (a.x - b.x));
 
-      showResult({ page: pageNo, dpi, D, k, S, W, H, dw, dh, wPt: io.wPt, hPt: io.hPt, rgba: fin.rgba, flags: flagsView, regions, T, how, kind, dp, textInfo,
+      showResult({ page: pageNo, dpi, D, k, S, W, H, dw, dh, wPt: io.wPt, hPt: io.hPt, annotsOld: io.annots, annotsNew: inew.annots, rgba: fin.rgba, flags: flagsView, regions, T, how, kind, dp, textInfo,
         ms: performance.now() - t0, ntiles: tiles.length });
     } catch (e) {
       if (String(e && e.message) === 'CANCEL') { showWarn('中止しました。'); }
@@ -1343,7 +1351,7 @@ function findRegions(removed, added, w, h, p) {
   // どれだけ拡大しても線や文字がにじまない。操作中は直前の絵を拡大・移動して見せ、止まったら描き直す
   const panes = [['pvOld', 'old'], ['pvNew', 'neu']].map(([id, key]) => {
     const el = $(id);
-    return { el, key, canvas: el.querySelector('canvas'), boxes: el.querySelector('.boxes'), pov: el.querySelector('.pov'), rv: null, task: null };
+    return { el, key, canvas: el.querySelector('canvas'), boxes: el.querySelector('.boxes'), svg: el.querySelector('svg.annots'), pov: el.querySelector('.pov'), rv: null, task: null };
   });
   const PT_PER_MM = 72 / MM, ZOOM_100 = 96 / 72, ZMAX = 2400 / 72;
   function sbsFitZ() {
@@ -1372,7 +1380,7 @@ function findRegions(removed, added, w, h, p) {
   let sbsTimer = null;
   function sbsUpdate() {
     const r = state.result, v = state.sv; if (!r || !v) return;
-    for (const p of panes) { applyPreview(p); drawPaneBoxes(p); }
+    for (const p of panes) { applyPreview(p); drawPaneBoxes(p); drawPaneAnnots(p); }
     $('zoomVal').textContent = `${Math.round(v.z / ZOOM_100 * 100).toLocaleString()}%`;
     $('sbsInfo').textContent = `表示の中心：左端から ${(v.cx / PT_PER_MM).toFixed(1)} mm、上端から ${(v.cy / PT_PER_MM).toFixed(1)} mm　／　倍率 ${Math.round(v.z / ZOOM_100 * 100).toLocaleString()}%（原寸＝100%）`;
     clearTimeout(sbsTimer);
@@ -1385,6 +1393,45 @@ function findRegions(removed, added, w, h, p) {
     const tx = W / 2 - k * rv.W / 2 + (rv.cx - v.cx) * v.z, ty = H / 2 - k * rv.H / 2 + (rv.cy - v.cy) * v.z;
     p.canvas.style.transform = `translate(${tx}px, ${ty}px) scale(${k})`;
   }
+  // 新版の点（pt）を旧版の座標に移す
+  function toOldPt(T, x, y) {
+    if (!T) return [x, y];
+    const c = Math.cos(T.th), s = Math.sin(T.th), dx = x - T.cx, dy = y - T.cy;
+    return [T.sc * (c * dx - s * dy) + T.cx + T.tx, T.sc * (s * dx + c * dy) + T.cy + T.ty];
+  }
+  // 注記を自前で描く（SVG）。f は旧版座標の pt → 画面座標
+  function annotSvg(list, T, f, z) {
+    let out = '';
+    for (const a of list || []) {
+      const g = a.geom || {}, col = g.color || '#e0007a', lw = Math.max(1.5, (g.width || 1) * z);
+      if (g.ink) {
+        for (const line of g.ink) {
+          const pts = line.map(([x, y]) => f(...toOldPt(T, x, y)));
+          const ext = pts.reduce((m, q) => Math.max(m, Math.abs(q[0] - pts[0][0]), Math.abs(q[1] - pts[0][1])), 0);
+          if (pts.length === 1 || ext < 0.5) {   // 点（長さ 0 の線）は丸で描く
+            out += `<circle cx="${pts[0][0]}" cy="${pts[0][1]}" r="${Math.max(3, lw / 2)}" fill="${col}"/>`;
+          } else {
+            out += `<polyline points="${pts.map((q) => q.join(',')).join(' ')}" fill="none" stroke="${col}" stroke-width="${lw}" stroke-linecap="round" stroke-linejoin="round"/>`;
+          }
+        }
+      } else {
+        const [ax, ay] = f(...toOldPt(T, a.x0, a.y0)), [bx, by] = f(...toOldPt(T, a.x1, a.y1));
+        out += `<rect x="${Math.min(ax, bx)}" y="${Math.min(ay, by)}" width="${Math.abs(bx - ax)}" height="${Math.abs(by - ay)}" fill="none" stroke="${col}" stroke-width="1.5" stroke-dasharray="5 3"/>`;
+      }
+    }
+    return out;
+  }
+  function drawPaneAnnots(p) {
+    const r = state.result, v = state.sv, W = p.el.clientWidth, H = p.el.clientHeight;
+    p.svg.setAttribute('width', W); p.svg.setAttribute('height', H);
+    if (!$('showAnnots').checked) { p.svg.innerHTML = ''; return; }
+    const f = (x, y) => [(x - v.cx) * v.z + W / 2, (y - v.cy) * v.z + H / 2];
+    p.svg.innerHTML = p.key === 'old' ? annotSvg(r.annotsOld, null, f, v.z) : annotSvg(r.annotsNew, r.Tpt, f, v.z);
+  }
+  $('showAnnots').addEventListener('change', () => {
+    if (state.mode === 'sbs') for (const p of panes) drawPaneAnnots(p);
+    drawDetail();
+  });
   function drawPaneBoxes(p) {
     const r = state.result, v = state.sv, W = p.el.clientWidth, H = p.el.clientHeight, k = 72 / r.D;
     let html = '';
@@ -1568,7 +1615,7 @@ function findRegions(removed, added, w, h, p) {
       const res = await call({ cmd: 'tile', oldG: a.gray, newG: b.gray, w, h, core: { x: 0, y: 0, w, h }, k: 1, p: dp, wantRGBA: true }, [a.gray.buffer, b.gray.buffer]);
       if (seq !== detailSeq) return;
       const box = [x0 * rr - ox, y0 * rr - oy, (x1 - x0) * rr, (y1 - y0) * rr];
-      state.dimgs = { w, h, box, diff: new ImageData(new Uint8ClampedArray(res.rgba), w, h), old: new ImageData(a.rgba, w, h), new: new ImageData(b.rgba, w, h) };
+      state.dimgs = { w, h, box, Sd, ox, oy, diff: new ImageData(new Uint8ClampedArray(res.rgba), w, h), old: new ImageData(a.rgba, w, h), new: new ImageData(b.rgba, w, h) };
       drawDetail();
     } catch (e) {
       if (seq === detailSeq) $('dNote').textContent = `拡大図を作れませんでした: ${e.message || e}`;
@@ -1580,6 +1627,16 @@ function findRegions(removed, added, w, h, p) {
     const c = $('dCanvas'); c.width = d.w; c.height = d.h;
     const ctx = c.getContext('2d');
     ctx.putImageData(d[state.dmode], 0, 0);
+    if ($('showAnnots').checked) {
+      // 注記を自前で描き足す（旧版の画面は旧版の注記、新版は新版の注記、差分は両方）
+      const r = state.result, f = (x, y) => [x * d.Sd - d.ox, y * d.Sd - d.oy];
+      const svg = (state.dmode !== 'new' ? annotSvg(r.annotsOld, null, f, d.Sd) : '') + (state.dmode !== 'old' ? annotSvg(r.annotsNew, r.Tpt, f, d.Sd) : '');
+      if (svg) {
+        const img = new Image();
+        img.onload = () => { if (state.dimgs === d) { ctx.drawImage(img, 0, 0); ctx.strokeStyle = '#ff9600'; ctx.lineWidth = Math.max(2, d.w / 500); ctx.strokeRect(...d.box); } };
+        img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="${d.w}" height="${d.h}">${svg}</svg>`);
+      }
+    }
     ctx.strokeStyle = '#ff9600'; ctx.lineWidth = Math.max(2, d.w / 500);
     ctx.strokeRect(...d.box);
     c.style.width = state.dzoom ? `${d.w}px` : '100%';
