@@ -141,6 +141,22 @@ button.ghost[aria-pressed="true"] { border-color: var(--accent); color: var(--ac
 .notice.err { background: var(--err-bg); color: var(--err-text); }
 #result { display: none; }
 #result.on { display: block; }
+.pagesbar { display: none; margin-bottom: 14px; padding-bottom: 14px; border-bottom: 1px solid var(--border); }
+.ptot { font-size: 14px; margin-bottom: 8px; }
+.ptot b { font-size: 16px; }
+.ptot small { color: var(--muted); font-size: 12px; }
+.pchips { display: flex; flex-wrap: wrap; gap: 6px; }
+.pchip { font: inherit; display: inline-flex; flex-direction: column; align-items: center; min-width: 64px; padding: 4px 8px;
+  border-radius: 8px; border: 1px solid var(--border); background: var(--surface); color: var(--text); cursor: pointer; line-height: 1.3; }
+.pchip b { font-size: 14px; }
+.pchip span { font-size: 11px; }
+.pchip.has { border-color: var(--box); border-width: 2px; }
+.pchip.has span { color: var(--note); font-weight: 700; }
+.pchip.none { color: var(--muted); }
+.pchip.wait { opacity: .55; cursor: default; }
+.pchip.err { border-color: var(--removed); color: var(--removed); }
+.pchip.cur { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+.pchip.cur span { color: var(--accent-text); }
 .summary { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 12px; }
 .stat { background: var(--surface-2); border-radius: 10px; padding: 8px 14px; min-width: 110px; }
 .stat b { display: block; font-size: 22px; font-variant-numeric: tabular-nums; }
@@ -228,7 +244,7 @@ tbody tr:hover, tbody tr.sel { background: var(--surface-2); }
 </head>
 <body>
 <main>
-  <h1>図面差分チェッカー <small style="font-size:12px;font-weight:400;color:var(--muted)">版 2.4（2026-10-17）</small></h1>
+  <h1>図面差分チェッカー <small style="font-size:12px;font-weight:400;color:var(--muted)">版 2.5（2026-10-17）</small></h1>
   <p class="lead">旧版と新版の図面PDFを重ね、<b style="color:var(--removed)">削除＝赤</b>、<b style="color:var(--added)">追加＝青</b>で変更点をハイライトします。CADから出力した超長尺・極小文字の図面にも、スキャン図面にも使えます。</p>
   <div class="privacy">🔒 図面はこのPCのブラウザ内だけで処理されます。どこにも送信されません。</div>
 
@@ -336,6 +352,7 @@ tbody tr:hover, tbody tr.sel { background: var(--surface-2); }
   </section>
 
   <section class="card" id="result">
+    <div class="pagesbar" id="pagesBar"></div>
     <div class="summary" id="summary"></div>
     <div class="legend" style="margin-bottom:12px">
       <span><span class="sw" style="background:var(--removed)"></span>削除（旧版のみ）</span>
@@ -411,6 +428,7 @@ self.onmessage = (e) => {
     if (d.cmd === 'prepare') prepare(d);
     else if (d.cmd === 'tile') tile(d);
     else if (d.cmd === 'finish') finish(d);
+    else if (d.cmd === 'paint') paint(d);
   } catch (err) { post({ id: d.id, error: String((err && err.stack) || err) }); }
 };
 
@@ -680,6 +698,14 @@ function finish(d) {
   const rgba = colorize(inkm, removed, added, w, h, p.emph);
   post({ id: d.id, rgba: rgba.buffer, regions }, [rgba.buffer]);
 }
+// 保存しておいた旗配列から全体図の画像だけを作り直す（ページの切り替え用）
+function paint(d) {
+  const { flags, w, h, p } = d;
+  const removed = new Uint8Array(w * h), added = new Uint8Array(w * h), inkm = new Uint8Array(w * h);
+  for (let i = 0; i < flags.length; i++) { const v = flags[i]; inkm[i] = v & 1; added[i] = (v >> 1) & 1; removed[i] = (v >> 2) & 1; }
+  const rgba = colorize(inkm, removed, added, w, h, p.emph);
+  post({ id: d.id, rgba: rgba.buffer }, [rgba.buffer]);
+}
 function findRegions(removed, added, w, h, p) {
   const f = 4, both = new Uint8Array(w * h);
   for (let i = 0; i < both.length; i++) both[i] = removed[i] | added[i];
@@ -781,6 +807,7 @@ function findRegions(removed, added, w, h, p) {
     const n = Math.min(state.old.numPages, state.neu.numPages);
     state.pageCount = n;
     const sel = $('page'); sel.innerHTML = '';
+    if (n > 1) sel.add(new Option(`すべてのページ（${n} ページ）`, 'all'));
     for (let i = 1; i <= n; i++) sel.add(new Option(`${i} ページ目`, i));
     sel.disabled = n <= 1;
     if (state.old.numPages !== state.neu.numPages)
@@ -1053,123 +1080,203 @@ function findRegions(removed, added, w, h, p) {
   }
 
   // ---------- 実行 ----------
-  async function run(pageNo) {
-    if (state.busy || !state.old || !state.neu) return;
-    state.busy = true; state.cancel = false; $('run').disabled = true; setNavDisabled(true);
-    hideNotices(); closeDetail();
-    setProgress('図面を調べています…', 1);
+  // 1 ページ分を比較して結果を返す（表示はしない）。prog(メッセージ, 0〜100) で進み具合を知らせる
+  async function computePage(pageNo, prog) {
     const t0 = performance.now();
-    try {
-      if (!state.info || state.infoPage !== pageNo) {
-        const [io, inew] = await Promise.all([inspect(state.old, pageNo), inspect(state.neu, pageNo)]);
-        state.info = io; state.infoNew = inew; state.infoPage = pageNo; updateKindInfo();
-      }
-      const io = state.info, inew = state.infoNew;
-      const kind = effKind();
-      let dpi = +$('dpi').value || autoDpi(kind, io.items.length);
-      const area = io.wPt * io.hPt;
-      if (area * (dpi / 72) ** 2 > MAX_ANALYSIS_PX) {
-        const d2 = Math.floor(72 * Math.sqrt(MAX_ANALYSIS_PX / area));
-        showWarn(`図面が大きいため、解像度を ${dpi} → ${d2} dpi に下げて処理しています。`); dpi = d2;
-      }
-      const S = dpi / 72, W = Math.ceil(io.wPt * S), H = Math.ceil(io.hPt * S);
-      const k = Math.max(1, Math.ceil(Math.sqrt(W * H / MAX_DISPLAY_PX))), D = dpi / k;
-      const blur = kind === 'scan';
+    const [io, inew] = state.infoPage === pageNo ? [state.info, state.infoNew]
+      : await Promise.all([inspect(state.old, pageNo), inspect(state.neu, pageNo)]);
+    const kind = $('kind').value === 'auto' ? io.kind : $('kind').value;
+    const warn = [];
+    let dpi = +$('dpi').value || autoDpi(kind, io.items.length);
+    const area = io.wPt * io.hPt;
+    if (area * (dpi / 72) ** 2 > MAX_ANALYSIS_PX) {
+      const d2 = Math.floor(72 * Math.sqrt(MAX_ANALYSIS_PX / area));
+      warn.push(`${pageNo} ページ目は図面が大きいため、解像度を ${dpi} → ${d2} dpi に下げて処理しました。`); dpi = d2;
+    }
+    const S = dpi / 72, W = Math.ceil(io.wPt * S), H = Math.ceil(io.hPt * S);
+    const k = Math.max(1, Math.ceil(Math.sqrt(W * H / MAX_DISPLAY_PX))), D = dpi / k;
+    const blur = kind === 'scan';
 
-      // --- しきい値と位置合わせ（低解像度の全体画像で） ---
-      setProgress('位置合わせ中…', 3);
-      const A = Math.min(S, Math.sqrt(MAX_ALIGN_PX / area), 16000 / Math.max(io.wPt, io.hPt, inew.wPt, inew.hPt));
-      const aw = Math.ceil(io.wPt * A), ah = Math.ceil(io.hPt * A), anw = Math.ceil(inew.wPt * A), anh = Math.ceil(inew.hPt * A);
-      const useText = $('textcmp').value === '1' && kind === 'cad' && io.items.length && inew.items.length;
-      let Tt = null, how = '';
-      if ($('align').value === '1' && useText) Tt = textAlign(io.items, inew.items, io.wPt / 2, io.hPt / 2);
-      const needEstimate = $('align').value === '1' && !Tt;
-      const [ra, rb] = await Promise.all([renderRect(state.old, pageNo, A, 0, 0, aw, ah), renderRect(state.neu, pageNo, A, 0, 0, anw, anh)]);
-      const ga = grayOf(ra.ctx, aw, ah).gray, gb = grayOf(rb.ctx, anw, anh).gray;
-      ra.cv.width = rb.cv.width = 0;
-      const prep = await call({ cmd: 'prepare', oldG: ga, w: aw, h: ah, newG: gb, nw: anw, nh: anh, cx: aw / 2, cy: ah / 2,
-        p: { kind, blur, threshold: +$('threshold').value || 0, estimate: needEstimate } }, [ga.buffer, gb.buffer]);
-      let T;
-      if (Tt) {
-        how = '（文字の位置から）';
-        T = scaleT(Tt, S);
-        const long = Math.max(W, H);
-        if (Math.max(Math.abs(T.tx), Math.abs(T.ty)) < 0.5 && Math.max(Math.abs(T.th), Math.abs(T.sc - 1)) * long / 2 < 0.5) T = { identity: true };
-      } else if (prep.T) T = prep.T.identity ? { identity: true } : scaleT(prep.T, S / A);
-      else T = { identity: true };
-      if (T.identity) T = { identity: true, th: 0, sc: 1, tx: 0, ty: 0, cx: W / 2, cy: H / 2 };
+    // --- しきい値と位置合わせ（低解像度の全体画像で） ---
+    prog('位置合わせ中…', 3);
+    const A = Math.min(S, Math.sqrt(MAX_ALIGN_PX / area), 16000 / Math.max(io.wPt, io.hPt, inew.wPt, inew.hPt));
+    const aw = Math.ceil(io.wPt * A), ah = Math.ceil(io.hPt * A), anw = Math.ceil(inew.wPt * A), anh = Math.ceil(inew.hPt * A);
+    const useText = $('textcmp').value === '1' && kind === 'cad' && io.items.length && inew.items.length;
+    let Tt = null, how = '';
+    if ($('align').value === '1' && useText) Tt = textAlign(io.items, inew.items, io.wPt / 2, io.hPt / 2);
+    const needEstimate = $('align').value === '1' && !Tt;
+    const [ra, rb] = await Promise.all([renderRect(state.old, pageNo, A, 0, 0, aw, ah), renderRect(state.neu, pageNo, A, 0, 0, anw, anh)]);
+    const ga = grayOf(ra.ctx, aw, ah).gray, gb = grayOf(rb.ctx, anw, anh).gray;
+    ra.cv.width = rb.cv.width = 0;
+    const prep = await call({ cmd: 'prepare', oldG: ga, w: aw, h: ah, newG: gb, nw: anw, nh: anh, cx: aw / 2, cy: ah / 2,
+      p: { kind, blur, threshold: +$('threshold').value || 0, estimate: needEstimate } }, [ga.buffer, gb.buffer]);
+    let T;
+    if (Tt) {
+      how = '（文字の位置から）';
+      T = scaleT(Tt, S);
+      const long = Math.max(W, H);
+      if (Math.max(Math.abs(T.tx), Math.abs(T.ty)) < 0.5 && Math.max(Math.abs(T.th), Math.abs(T.sc - 1)) * long / 2 < 0.5) T = { identity: true };
+    } else if (prep.T) T = prep.T.identity ? { identity: true } : scaleT(prep.T, S / A);
+    else T = { identity: true };
+    if (T.identity) T = { identity: true, th: 0, sc: 1, tx: 0, ty: 0, cx: W / 2, cy: H / 2 };
 
-      const r300 = dpi / 300;
-      let dp;
-      if (kind === 'cad') {
-        const tol = T.identity ? 1 : Math.max(1, Math.round(0.1 / MM * dpi));
-        dp = { blur: false, thrOld: prep.thrOld, thrNew: prep.thrNew, tol, openK: 0, minArea: T.identity ? 4 : Math.max(4, tol * tol), emph: 1 };
-      } else {
-        dp = { blur: true, thrOld: prep.thrOld, thrNew: prep.thrNew, tol: Math.round(+$('tolerance').value * r300),
-          openK: Math.round(+$('openK').value * r300), minArea: Math.round(+$('minArea').value * r300 * r300), emph: 1 };
-      }
+    const r300 = dpi / 300;
+    let dp;
+    if (kind === 'cad') {
+      const tol = T.identity ? 1 : Math.max(1, Math.round(0.1 / MM * dpi));
+      dp = { blur: false, thrOld: prep.thrOld, thrNew: prep.thrNew, tol, openK: 0, minArea: T.identity ? 4 : Math.max(4, tol * tol), emph: 1 };
+    } else {
+      dp = { blur: true, thrOld: prep.thrOld, thrNew: prep.thrNew, tol: Math.round(+$('tolerance').value * r300),
+        openK: Math.round(+$('openK').value * r300), minArea: Math.round(+$('minArea').value * r300 * r300), emph: 1 };
+    }
 
-      // --- タイル処理 ---
-      const TH = Math.min(H, Math.max(k, Math.floor(4096 / k) * k));
-      const TW = Math.min(W, Math.max(k, Math.floor(Math.min(TILE_PX / (TH + 2 * MARGIN) - 2 * MARGIN, 12000) / k) * k));
-      const dw = Math.ceil(W / k), dh = Math.ceil(H / k), flags = new Uint8Array(dw * dh);
-      const tiles = []; for (let y = 0; y < H; y += TH) for (let x = 0; x < W; x += TW) tiles.push([x, y]);
-      let prev = null;
-      const merge = (res, X0, Y0) => {
-        const f = new Uint8Array(res.flags), fx = X0 / k, fy = Y0 / k;
-        for (let y = 0; y < res.fh && fy + y < dh; y++) {
-          const src = y * res.fw, dst = (fy + y) * dw + fx;
-          for (let x = 0; x < res.fw && fx + x < dw; x++) flags[dst + x] |= f[src + x];
-        }
-      };
-      for (let ti = 0; ti < tiles.length; ti++) {
-        if (state.cancel) throw new Error('CANCEL');
-        const [X0, Y0] = tiles[ti], cw = Math.min(TW, W - X0), ch = Math.min(TH, H - Y0);
-        const ox = X0 - MARGIN, oy = Y0 - MARGIN, tw = cw + 2 * MARGIN, th = ch + 2 * MARGIN;
-        const el = (performance.now() - t0) / 1000, eta = ti ? el / ti * (tiles.length - ti) : 0;
-        setProgress(`比較中… ${ti + 1} / ${tiles.length} 区画${ti ? `（残り 約 ${Math.ceil(eta)} 秒）` : ''}`, 6 + 86 * ti / tiles.length);
-        const [ro, rn] = await Promise.all([renderRect(state.old, pageNo, S, ox, oy, tw, th), renderRect(state.neu, pageNo, S, ox, oy, tw, th, T)]);
-        const og = grayOf(ro.ctx, tw, th).gray, ng = grayOf(rn.ctx, tw, th).gray;
-        ro.cv.width = rn.cv.width = 0;
-        if (prev) { const r = await prev.p; merge(r, prev.X0, prev.Y0); }
-        prev = { X0, Y0, p: call({ cmd: 'tile', oldG: og, newG: ng, w: tw, h: th, core: { x: MARGIN, y: MARGIN, w: cw, h: ch }, k, p: dp }, [og.buffer, ng.buffer]) };
+    // --- タイル処理 ---
+    const TH = Math.min(H, Math.max(k, Math.floor(4096 / k) * k));
+    const TW = Math.min(W, Math.max(k, Math.floor(Math.min(TILE_PX / (TH + 2 * MARGIN) - 2 * MARGIN, 12000) / k) * k));
+    const dw = Math.ceil(W / k), dh = Math.ceil(H / k), flags = new Uint8Array(dw * dh);
+    const tiles = []; for (let y = 0; y < H; y += TH) for (let x = 0; x < W; x += TW) tiles.push([x, y]);
+    let prev = null;
+    const merge = (res, X0, Y0) => {
+      const f = new Uint8Array(res.flags), fx = X0 / k, fy = Y0 / k;
+      for (let y = 0; y < res.fh && fy + y < dh; y++) {
+        const src = y * res.fw, dst = (fy + y) * dw + fx;
+        for (let x = 0; x < res.fw && fx + x < dw; x++) flags[dst + x] |= f[src + x];
       }
+    };
+    for (let ti = 0; ti < tiles.length; ti++) {
+      if (state.cancel) throw new Error('CANCEL');
+      const [X0, Y0] = tiles[ti], cw = Math.min(TW, W - X0), ch = Math.min(TH, H - Y0);
+      const ox = X0 - MARGIN, oy = Y0 - MARGIN, tw = cw + 2 * MARGIN, th = ch + 2 * MARGIN;
+      const el = (performance.now() - t0) / 1000, eta = ti ? el / ti * (tiles.length - ti) : 0;
+      prog(`比較中… ${ti + 1} / ${tiles.length} 区画${ti ? `（残り 約 ${Math.ceil(eta)} 秒）` : ''}`, 6 + 86 * ti / tiles.length);
+      const [ro, rn] = await Promise.all([renderRect(state.old, pageNo, S, ox, oy, tw, th), renderRect(state.neu, pageNo, S, ox, oy, tw, th, T)]);
+      const og = grayOf(ro.ctx, tw, th).gray, ng = grayOf(rn.ctx, tw, th).gray;
+      ro.cv.width = rn.cv.width = 0;
       if (prev) { const r = await prev.p; merge(r, prev.X0, prev.Y0); }
+      prev = { X0, Y0, p: call({ cmd: 'tile', oldG: og, newG: ng, w: tw, h: th, core: { x: MARGIN, y: MARGIN, w: cw, h: ch }, k, p: dp }, [og.buffer, ng.buffer]) };
+    }
+    if (prev) { const r = await prev.p; merge(r, prev.X0, prev.Y0); }
 
-      setProgress('変更箇所をまとめています…', 94);
-      const pad = Math.max(2, Math.round(15 * D / 300));
-      const flagsView = flags.slice();   // 折り返し表示用に残す（finish にはコピー元を渡す）
-      const fin = await call({ cmd: 'finish', flags, w: dw, h: dh, p: { cluster: Math.max(4, Math.round(+$('cluster').value * D / 300)), pad, emph: Math.max(1, Math.round(D / 300)) } }, [flags.buffer]);
-      let regions = fin.regions;
-      let textInfo = null;
-      if (useText) {
-        const changes = textDiff(io.items, inew.items, scaleT(T, 1 / S));
-        textInfo = { n: changes.length };
-        regions = mergeText(regions, changes, D, pad, dw, dh);
-      }
-      if (io.annots.length || inew.annots.length) {
-        regions = mergeText(regions, annotDiff(io.annots, inew.annots, scaleT(T, 1 / S)), D, pad, dw, dh);
-      }
-      const band = Math.max(1, Math.floor(dh / 40));
-      regions.sort((a, b) => (Math.floor(a.y / band) - Math.floor(b.y / band)) || (a.x - b.x));
+    prog('変更箇所をまとめています…', 94);
+    const pad = Math.max(2, Math.round(15 * D / 300));
+    const flagsView = flags.slice();   // 表示用に残す（ページを切り替えても再計算しないよう、圧縮して保持する）
+    const fin = await call({ cmd: 'finish', flags, w: dw, h: dh, p: { cluster: Math.max(4, Math.round(+$('cluster').value * D / 300)), pad, emph: Math.max(1, Math.round(D / 300)) } }, [flags.buffer]);
+    let regions = fin.regions;
+    let textInfo = null;
+    if (useText) {
+      const changes = textDiff(io.items, inew.items, scaleT(T, 1 / S));
+      textInfo = { n: changes.length };
+      regions = mergeText(regions, changes, D, pad, dw, dh);
+    }
+    if (io.annots.length || inew.annots.length) {
+      regions = mergeText(regions, annotDiff(io.annots, inew.annots, scaleT(T, 1 / S)), D, pad, dw, dh);
+    }
+    const band = Math.max(1, Math.floor(dh / 40));
+    regions.sort((a, b) => (Math.floor(a.y / band) - Math.floor(b.y / band)) || (a.x - b.x));
 
-      showResult({ page: pageNo, dpi, D, k, S, W, H, dw, dh, wPt: io.wPt, hPt: io.hPt, annotsOld: io.annots, annotsNew: inew.annots, rgba: fin.rgba, flags: flagsView, regions, T, how, kind, dp, textInfo,
-        ms: performance.now() - t0, ntiles: tiles.length });
+    return { page: pageNo, dpi, D, k, S, W, H, dw, dh, wPt: io.wPt, hPt: io.hPt, annotsOld: io.annots, annotsNew: inew.annots,
+      flagsRLE: rle(flagsView), regions, T, how, kind, dp, textInfo, warn, ms: performance.now() - t0, ntiles: tiles.length };
+  }
+  // 旗配列は大半が 0 なので、同じ値の連続をまとめて圧縮して持つ
+  function rle(a) {
+    const out = []; const n = a.length;
+    for (let i = 0; i < n;) {
+      const v = a[i]; let j = i + 1;
+      while (j < n && a[j] === v && j - i < 0xffffff) j++;
+      out.push(((v << 24) | (j - i)) >>> 0); i = j;
+    }
+    return Uint32Array.from(out);
+  }
+  function unrle(runs, n) {
+    const a = new Uint8Array(n); let i = 0;
+    for (const x of runs) { const v = x >>> 24, len = x & 0xffffff; if (v) a.fill(v, i, i + len); i += len; }
+    return a;
+  }
+
+  // pages のページを順に比較する。終わったページから見られる
+  async function run(pages) {
+    if (state.busy || !state.old || !state.neu) return;
+    state.busy = true; state.cancel = false; $('run').disabled = true;
+    hideNotices(); closeDetail();
+    state.results = new Map(); state.runPages = pages; state.result = null; state.userPicked = false;
+    $('result').classList.remove('on');
+    setNavDisabled(true); renderPagesBar();
+    const warns = [];
+    let shown = false;
+    try {
+      for (let i = 0; i < pages.length; i++) {
+        if (state.cancel) throw new Error('CANCEL');
+        const pg = pages[i], pre = pages.length > 1 ? `ページ ${pg}（${i + 1} / ${pages.length}）：` : '';
+        state.computing = pg; renderPagesBar();
+        let r;
+        try {
+          r = await computePage(pg, (m, pct) => setProgress(pre + m, (i + pct / 100) / pages.length * 100));
+          warns.push(...r.warn);
+        } catch (e) {
+          if (String(e && e.message) === 'CANCEL') throw e;
+          console.error(e);
+          const msg = String(e && e.message || e);
+          r = { page: pg, error: /memory|allocation|Array buffer|Invalid array length|out of/i.test(msg)
+            ? 'メモリ不足（解像度を下げてください）' : msg, regions: [] };
+        }
+        state.results.set(pg, r);
+        state.computing = 0; renderPagesBar(); setNavDisabled(true);
+        // 最初のページが終わったら、残りを比較している間も見られるようにする。
+        // 表示中のページに変更がなく、変更のあるページが見つかったら（自分でページを選んでいなければ）そちらに切り替える
+        if (!r.error && (!shown || (state.result && !state.result.regions.length && r.regions.length && !state.userPicked))) {
+          await showPage(pg); shown = true;
+        }
+      }
     } catch (e) {
-      if (String(e && e.message) === 'CANCEL') { showWarn('中止しました。'); }
-      else {
-        console.error(e);
-        const msg = String(e && e.message || e);
-        showErr(/memory|allocation|Array buffer|Invalid array length|out of/i.test(msg)
-          ? 'メモリが足りませんでした。解像度を下げて（300dpi など）もう一度お試しください。'
-          : `処理中にエラーが発生しました: ${msg}`);
-      }
+      if (String(e && e.message) === 'CANCEL') showWarn('中止しました。比較が終わったページまでの結果を表示しています。');
+      else { console.error(e); showErr(`処理中にエラーが発生しました: ${e.message || e}`); }
     } finally {
-      state.busy = false; $('run').disabled = !(state.old && state.neu);
+      state.busy = false; state.computing = 0;
+      $('run').disabled = !(state.old && state.neu);
       $('progress').classList.remove('on');
-      setNavDisabled(false);
+      if (warns.length) showWarn(warns.join(' '));
+      const errs = [...state.results.values()].filter((r) => r.error);
+      if (errs.length) showErr(errs.map((r) => `${r.page} ページ目: ${r.error}`).join(' / '));
+      if (!shown) { const first = [...state.results.values()].find((r) => !r.error); if (first) await showPage(first.page); }
+      renderPagesBar(); setNavDisabled(false);
     }
   }
+  // 比較済みのページを表示する（保存しておいた旗配列から全体図を作り直す）
+  async function showPage(pg) {
+    const r = state.results.get(pg); if (!r || r.error) return;
+    if (state.result && state.result !== r) { state.result.flags = null; state.result.canvases = null; }
+    closeDetail();
+    r.flags = unrle(r.flagsRLE, r.dw * r.dh);
+    const res = await call({ cmd: 'paint', flags: r.flags.slice(), w: r.dw, h: r.dh, p: { emph: Math.max(1, Math.round(r.D / 300)) } });
+    r.rgba = res.rgba;
+    showResult(r);
+    renderPagesBar(); setNavDisabled(state.busy);
+  }
+  // ページごとの変更件数（クリックでそのページを表示）
+  function renderPagesBar() {
+    const bar = $('pagesBar'), pages = state.runPages || [];
+    if (pages.length <= 1) { bar.innerHTML = ''; bar.style.display = 'none'; return; }
+    bar.style.display = 'block';
+    let total = 0, withCh = 0, done = 0;
+    const chips = pages.map((pg) => {
+      const r = state.results.get(pg), cur = state.result && state.result.page === pg;
+      let cls = 'pchip', label;
+      if (r && r.error) { cls += ' err'; label = 'エラー'; done++; }
+      else if (r) {
+        done++; total += r.regions.length; if (r.regions.length) withCh++;
+        label = r.regions.length ? `${r.regions.length} 件` : '変更なし'; cls += r.regions.length ? ' has' : ' none';
+      } else { cls += ' wait'; label = state.computing === pg ? '比較中…' : '待ち'; }
+      if (cur) cls += ' cur';
+      return `<button class="${cls}" data-page="${pg}" ${r && !r.error ? '' : 'disabled'}><b>${pg}</b><span>${label}</span></button>`;
+    }).join('');
+    bar.innerHTML = `<div class="ptot">全 ${pages.length} ページ中 ${done < pages.length ? `${done} ページ比較済み・` : ''}<b>${withCh}</b> ページに変更（合計 <b>${total}</b> 件）　<small>ページ番号をクリックすると、そのページの結果を表示します</small></div><div class="pchips">${chips}</div>`;
+    $('result').classList.add('on');
+  }
+  $('pagesBar').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-page]'); if (!b || b.disabled) return;
+    state.userPicked = true;
+    showPage(+b.dataset.page);
+  });
   $('cancel').onclick = () => { state.cancel = true; $('progMsg').textContent = '中止しています…'; };
 
   // ---------- 結果表示 ----------
@@ -1209,7 +1316,7 @@ function findRegions(removed, added, w, h, p) {
     $('result').classList.add('on');
     $('prevPage').disabled = r.page <= 1;
     $('nextPage').disabled = r.page >= state.pageCount;
-    $('page').value = r.page;
+    if ((state.runPages || []).length <= 1) $('page').value = r.page;   // 全ページ比較のときは「すべてのページ」のままにする
     // 横長の図面（長辺が短辺の 3 倍超）は、文章のように折り返して全体を見せる
     r.long = r.dw / r.dh > 3;
     r.Tpt = r.T.identity ? null : scaleT(r.T, 1 / r.S);   // 新版→旧版の変換（pt 単位）
@@ -1388,6 +1495,7 @@ function findRegions(removed, added, w, h, p) {
   }
   function applyPreview(p) {
     const v = state.sv, rv = p.rv;
+    if (!v) return;
     if (!rv) { p.canvas.style.transform = ''; return; }
     const W = p.el.clientWidth, H = p.el.clientHeight, k = v.z / rv.z;
     const tx = W / 2 - k * rv.W / 2 + (rv.cx - v.cx) * v.z, ty = H / 2 - k * rv.H / 2 + (rv.cy - v.cy) * v.z;
@@ -1443,7 +1551,8 @@ function findRegions(removed, added, w, h, p) {
     p.boxes.innerHTML = html;
   }
   async function renderPane(p) {
-    const r = state.result, v = { ...state.sv };
+    const r = state.result; if (!r || !state.sv) return;
+    const v = { ...state.sv };
     const W = p.el.clientWidth, H = p.el.clientHeight; if (!W || !H) return;
     const dpr = window.devicePixelRatio || 1, s = v.z * dpr, cw = Math.round(W * dpr), ch = Math.round(H * dpr);
     const doc = p.key === 'old' ? state.old : state.neu;
@@ -1456,6 +1565,7 @@ function findRegions(removed, added, w, h, p) {
     p.task = task; p.el.classList.add('busy');
     try { await task.promise; } catch (e) { return; }   // 新しい描画に置き換えられた
     if (p.task !== task) return;
+    if (state.result !== r || !state.sv) { p.task = null; p.el.classList.remove('busy'); return; }   // 描画中にページが切り替わった
     p.task = null; p.el.classList.remove('busy');
     p.canvas.width = cw; p.canvas.height = ch;
     p.canvas.getContext('2d').drawImage(off, 0, 0); off.width = 0;
@@ -1686,22 +1796,38 @@ function findRegions(removed, added, w, h, p) {
     }, 'image/png');
   };
   $('dlCsv').onclick = () => {
-    const r = state.result, mm = (v) => (v * MM / r.D).toFixed(1);
-    const q = (s) => `"${String(s).replace(/"/g, '""')}"`;
+    // 比較したすべてのページの変更箇所を 1 つの CSV にまとめる
+    const q = (x) => `"${String(x).replace(/"/g, '""')}"`;
     const rows = [['ページ', 'No', '種別', 'x_mm', 'y_mm', '幅_mm', '高さ_mm', '内容（文字・注記の変更）']];
-    r.regions.forEach((g, i) => rows.push([r.page, i + 1, kindOf(g)[1], mm(g.x), mm(g.y), mm(g.w), mm(g.h), q(g.notes.join(' / '))]));
-    download(new Blob(['﻿' + rows.map((x) => x.join(',')).join('\r\n')], { type: 'text/csv' }), `${baseName()}.csv`);
+    const all = [...state.results.values()].sort((x, y) => x.page - y.page);
+    for (const r of all) {
+      if (r.error) { rows.push([r.page, '', 'エラー', '', '', '', '', q(r.error)]); continue; }
+      if (!r.regions.length && all.length > 1) { rows.push([r.page, '', '変更なし', '', '', '', '', '']); continue; }
+      const mm = (v) => (v * MM / r.D).toFixed(1);
+      r.regions.forEach((g, i) => rows.push([r.page, i + 1, kindOf(g)[1], mm(g.x), mm(g.y), mm(g.w), mm(g.h), q(g.notes.join(' / '))]));
+    }
+    const name = all.length > 1 ? `差分_${state.oldName.replace(/\.pdf$/i, '')}_vs_${state.newName.replace(/\.pdf$/i, '')}_全ページ` : baseName();
+    download(new Blob(['\ufeff' + rows.map((x) => x.join(',')).join('\r\n')], { type: 'text/csv' }), `${name}.csv`);
   };
 
   // ---------- ページ移動 ----------
   function setNavDisabled(d) {
     const r = state.result;
-    $('prevPage').disabled = d || !r || r.page <= 1;
-    $('nextPage').disabled = d || !r || r.page >= state.pageCount;
+    // 一括比較中でも、比較済みのページへは移動できる
+    const ok = (pg) => !d || (state.results && state.results.has(pg) && !state.results.get(pg).error);
+    $('prevPage').disabled = !r || r.page <= 1 || !ok(r.page - 1);
+    $('nextPage').disabled = !r || r.page >= state.pageCount || !ok(r.page + 1);
   }
-  $('prevPage').onclick = () => run(state.result.page - 1);
-  $('nextPage').onclick = () => run(state.result.page + 1);
-  $('run').onclick = () => run(+$('page').value || 1);
+  const gotoPage = (pg) => {
+    if (state.results && state.results.has(pg) && !state.results.get(pg).error) { state.userPicked = true; showPage(pg); }
+    else if (!state.busy) run([pg]);
+  };
+  $('prevPage').onclick = () => gotoPage(state.result.page - 1);
+  $('nextPage').onclick = () => gotoPage(state.result.page + 1);
+  $('run').onclick = () => {
+    const v = $('page').value;
+    run(v === 'all' ? Array.from({ length: state.pageCount }, (_, i) => i + 1) : [+v || 1]);
+  };
 
   // ---------- 表示ヘルパー ----------
   function setProgress(msg, pct) { $('progress').classList.add('on'); $('progMsg').textContent = msg; $('barFill').style.width = `${pct}%`; }
